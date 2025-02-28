@@ -16,9 +16,9 @@ const execPromise = promisify(exec);
 
 //  Configure Cloudinary
 cloudinary.config({
-  cloud_name: "dpoggb7ri",
-  api_key: "351841311686893",
-  api_secret: "b4O7Z1rHwG6iSDflyG1985Do6Cs",
+  cloud_name: process.env.CLOUDNAME,
+  api_key: process.env.CLOUDAPIKEY,
+  api_secret: process.env.CLOUDSECRET,
 });
 
 const getVideoResolution = async (
@@ -74,7 +74,7 @@ export async function POST(req: Request): Promise<Response> {
       const uploadDir = path.join("temp/final", folderUUID + date);
       try {
         let evtid = 1;
-        sendStatus(evtid, "Uploading...");
+        sendStatus(evtid, "Reading...");
         const formData = await req.formData();
         const file = formData.get("file") as File;
         if (!file) throw new Error("No file uploaded.");
@@ -117,10 +117,7 @@ export async function POST(req: Request): Promise<Response> {
 
           await execPromise(hlsCommand);
           await delay(500);
-          sendStatus(
-            evtid++,
-            "Processing completed. Uploading to Cloudinary..."
-          );
+          sendStatus(evtid++, "Uploading to Cloud...");
 
           //  Upload the .m3u8 file and all .ts files
           const files = await fs.readdir(uploadDir);
