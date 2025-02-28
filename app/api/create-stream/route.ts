@@ -67,7 +67,11 @@ export async function POST(req: Request): Promise<Response> {
         controller.enqueue(`${JSON.stringify({ id, message, ...data })}\n\n`);
       };
       const folderUUID = randomUUID();
-      const uploadDir = path.join("public/final", folderUUID);
+      const date = new Date();
+      const datestr = date
+        .toLocaleString("en-GB", { hour12: false })
+        .replace(/[ ,:]/g, "");
+      const uploadDir = path.join("public/final", folderUUID + date);
       try {
         let evtid = 1;
         sendStatus(evtid, "Uploading...");
@@ -79,10 +83,14 @@ export async function POST(req: Request): Promise<Response> {
           throw new Error("Invalid file type. Only video files are allowed.");
         }
 
+        const uniqueFilename = `${path.basename(
+          file.name,
+          path.extname(file.name)
+        )}-${randomUUID()}${path.extname(file.name)}`;
         //file uploading on server from buffer
         const arrayBuffer = await file.arrayBuffer();
         const buffer = new Uint8Array(arrayBuffer);
-        const inputFilePath = `./public/uploads/${file.name}`;
+        const inputFilePath = `./public/uploads/${uniqueFilename}`;
         await fs.writeFile(inputFilePath, buffer);
 
         try {
