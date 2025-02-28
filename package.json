@@ -1,0 +1,25 @@
+{
+  "name": "video-streams-server",
+  "version": "1.0.0",
+  "description": "video processing, formating and creating m3u8 streamable videos",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cloudinary": "^2.5.1",
+    "ffmpeg": "^0.0.4",
+    "formidable": "^3.5.2",
+    "next": "^15.1.7",
+    "next-cors": "^1.0.0",
+    "typescript": "^5.7.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "@types/react": "19.0.10"
+  }
+}
