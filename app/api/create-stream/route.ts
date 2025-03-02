@@ -71,7 +71,7 @@ export async function POST(req: Request): Promise<Response> {
       const datestr = date
         .toLocaleString("en-GB", { hour12: false })
         .replace(/[ ,:]/g, "");
-      const uploadDir = path.join("temp/final", folderUUID + date);
+      const uploadDir = path.join("temp/final", folderUUID + datestr);
       try {
         let evtid = 1;
         sendStatus(evtid, "Reading...");

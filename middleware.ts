@@ -4,7 +4,12 @@ export function middleware(req: Request) {
   const { pathname } = new URL(req.url);
   const res = NextResponse.next();
 
-  const validRoutes = ["/api/healthcheck", "/api/create-stream"];
+  const validRoutes = [
+    "/api/healthcheck",
+    "/api/create-stream",
+    "/api/stream",
+    "/api/up",
+  ];
 
   res.headers.set("Access-Control-Allow-Origin", "*");
   res.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");

@@ -1,19 +1,10 @@
 import { NextResponse } from "next/server";
-import workerpool from "workerpool";
-import * as fs from "node:fs"; // Standard fs for streams like createWriteStream
-import { promises as fsPromises } from "node:fs"; // fs.promises for async file operations
-import { exec } from "child_process"; // Import exec from child_process
-import { promisify } from "util"; // For promisifying exec
-import { v2 as cloudinary } from "cloudinary";
+import fs from "node:fs/promises";
+import { Worker } from "worker_threads";
 import { randomUUID } from "crypto";
 import path from "path";
-import { pipeline } from "stream/promises";
-import chokidar from "chokidar"; // To watch for new .ts files in the directory
-import { Readable } from "stream"; // Use Node.js Readable stream
 
-const execPromise = promisify(exec); // Promisify exec for async use
-const pool = workerpool.pool("./worker-video.ts");
-
+// Allowed video types
 const ALLOWED_VIDEO_TYPES = [
   "video/mp4",
   "video/mkv",
@@ -21,34 +12,37 @@ const ALLOWED_VIDEO_TYPES = [
   "video/avi",
 ];
 
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDNAME,
-  api_key: process.env.CLOUDAPIKEY,
-  api_secret: process.env.CLOUDSECRET,
-});
+// Function to run FFmpeg in a worker thread
+const runFFmpegWorker = (
+  inputFilePath: string,
+  uploadDir: string
+): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(
+      path.resolve("./app/api/stream/ffmpegWorker.js"),
+      {
+        workerData: { inputFilePath, uploadDir },
+      }
+    );
 
-// Function to upload single segment to Cloudinary and then delete
-const uploadSegmentToCloudinary = async (filePath: string, folder: string) => {
-  try {
-    const result = await cloudinary.uploader.upload(filePath, {
-      resource_type: "raw",
-      folder,
-      use_filename: true,
-      unique_filename: false,
-      overwrite: true,
+    worker.on("message", (message) => {
+      if (message.success) {
+        resolve();
+      } else {
+        reject(new Error(message.error));
+      }
     });
-    console.log("uploading segment", filePath);
-    await fsPromises.unlink(filePath); // Delete file after successful upload
-    return result;
-  } catch (error) {
-    console.error(`Cloudinary upload failed for ${filePath}:`, error);
-    throw new Error(`Failed to upload segment: ${error.message}`);
-  }
+
+    worker.on("error", reject);
+    worker.on("exit", (code) => {
+      if (code !== 0)
+        reject(new Error(`Worker stopped with exit code ${code}`));
+    });
+  });
 };
 
+// Main handler function
 export async function POST(req: Request): Promise<Response> {
-  console.log("hello");
   const stream = new ReadableStream({
     async start(controller) {
       const sendStatus = (id: number, message: string, data: object = {}) => {
@@ -56,21 +50,17 @@ export async function POST(req: Request): Promise<Response> {
       };
 
       const folderUUID = randomUUID();
-      const date = new Date();
-      const datestr = date
-        .toLocaleString("en-GB", { hour12: false })
-        .replace(/[ ,:]/g, "");
-      const uploadDir = path.join("temp/final", folderUUID + datestr);
+      const date = new Date().toISOString().replace(/[:.-]/g, "");
+      const uploadDir = path.join("temp/final", `${folderUUID}_${date}`);
+      const evtid = { id: 1 }; // Use a mutable object to track the event id
 
       try {
-        let evtid = 1;
-        sendStatus(evtid++, "Reading...");
-
+        sendStatus(evtid.id++, "Reading input data...");
         const formData = await req.formData();
         const file = formData.get("file") as File;
-        if (!file) throw new Error("No file uploaded.");
 
-        if (!ALLOWED_VIDEO_TYPES.includes(file.type)) {
+        // Validate file input
+        if (!file || !ALLOWED_VIDEO_TYPES.includes(file.type)) {
           throw new Error("Invalid file type. Only video files are allowed.");
         }
 
@@ -78,108 +68,69 @@ export async function POST(req: Request): Promise<Response> {
           file.name,
           path.extname(file.name)
         )}-${randomUUID()}${path.extname(file.name)}`;
-        const inputFilePath = `./temp/uploads/${uniqueFilename}`;
+        const inputFilePath = path.join("temp/uploads", uniqueFilename);
+        const arrayBuffer = await file.arrayBuffer();
+        await fs.writeFile(inputFilePath, Buffer.from(arrayBuffer));
 
-        // Convert web ReadableStream to Node.js Readable stream manually
-        const nodeReadableStream = new Readable({
-          read() {
-            file
-              .stream()
-              .getReader()
-              .read()
-              .then(({ value, done }) => {
-                if (done) {
-                  this.push(null);
-                } else {
-                  this.push(Buffer.from(value));
-                }
-              });
-          },
+        sendStatus(evtid.id++, "Processing the video...");
+
+        // Ensure the upload directory exists
+        await fs.mkdir(uploadDir, { recursive: true });
+
+        // Set up worker for watching, uploading, and deleting
+        const uploadWorker = new Worker("./app/api/stream/uploadWorker.js", {
+          workerData: { uploadDir, folder: `hls_videos/${folderUUID}` },
         });
 
-        // Stream video file to disk using the Node.js stream
-        const writeStream = fs.createWriteStream(inputFilePath);
-        await pipeline(nodeReadableStream, writeStream);
-
-        sendStatus(evtid++, "Checking resolution...");
-
-        const getVideoResolution = async (
-          filePath: string
-        ): Promise<{ width: number; height: number }> => {
-          const { stdout } = await execPromise(
-            `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json "${filePath}"`
-          );
-          const metadata = JSON.parse(stdout);
-          return {
-            width: metadata.streams[0].width,
-            height: metadata.streams[0].height,
-          };
-        };
-
-        const { width, height } = await getVideoResolution(inputFilePath);
-        if (Math.min(height, width) < 360) {
-          throw new Error(`Video resolution too low: ${width}x${height}`);
-        }
-
-        sendStatus(evtid++, "Processing...");
-
-        await fsPromises.mkdir(uploadDir, { recursive: true });
-
-        const cloudinaryFolder = `hls_videos/${folderUUID}`;
-
-        // Watch for new .ts files and upload them immediately
-        const watcher = chokidar.watch(`${uploadDir}/*.ts`, {
-          persistent: true,
-        });
-        watcher.on("add", async (filePath) => {
-          try {
-            await uploadSegmentToCloudinary(filePath, cloudinaryFolder);
-            sendStatus(evtid++, `Uploaded segment: ${path.basename(filePath)}`);
-          } catch (error) {
-            sendStatus(-1, `Error uploading segment: ${error.message}`);
+        // Handle worker messages
+        uploadWorker.on("message", (message) => {
+          if (message?.success) {
+            console.log(`Uploaded and deleted: ${message.filePath}`);
+          } else {
+            console.error(
+              `Error with file ${message?.filePath}: ${message?.error}`
+            );
           }
         });
 
-        // Offload processing to workerpool
-        pool
-          .exec("processVideo", [inputFilePath, uploadDir])
-          .then(async (result) => {
-            sendStatus(evtid++, result.message);
+        // Run FFmpeg in a worker thread
+        await runFFmpegWorker(inputFilePath, uploadDir);
 
-            // Wait for FFmpeg to complete and upload M3U8 file
-            const playlistFile = `${uploadDir}/index.m3u8`;
-            const uploadedPlaylist = await cloudinary.uploader.upload(
-              playlistFile,
-              {
-                resource_type: "raw",
-                folder: cloudinaryFolder,
-                use_filename: true,
-                unique_filename: false,
-                overwrite: true,
-              }
-            );
+        // Once FFmpeg processing is done, notify the worker to upload the .m3u8 file
+        const playlistFilePath = path.join(uploadDir, "index.m3u8");
+        // uploadWorker.postMessage({
+        //   type: "upload-m3u8",
+        //   filePath: playlistFilePath,
+        //   folder: `hls_videos/${folderUUID}`,
+        // });
 
-            sendStatus(evtid++, "Upload completed!", {
-              url: uploadedPlaylist.secure_url,
-            });
-          })
-          .catch((error) => {
-            sendStatus(-1, "Error", {
-              err: `Worker pool error: ${(error as Error).message}`,
-            });
-          })
-          .finally(async () => {
-            await watcher.close(); // Stop watching the directory
-            await fsPromises.rm(uploadDir, { recursive: true, force: true }); // Cleanup
-            await fsPromises.unlink(inputFilePath); // Cleanup original file
-            setTimeout(() => controller.close(), 500);
-          });
-      } catch (error) {
-        sendStatus(-1, "Error", {
-          err:
-            (error as Error).message ||
-            "Something went wrong, please upload again",
+        // Notify the worker that all files have been processed
+        uploadWorker.postMessage({
+          type: "upload-complete",
         });
+
+        sendStatus(
+          evtid.id++,
+          "Video processing completed, uploading playlist..."
+        );
+
+        sendStatus(0, "Upload completed!");
+      } catch (error) {
+        console.error("Error:", error.message);
+        sendStatus(-1, "Error", { error: error.message });
+      } finally {
+        // Clean up
+        try {
+          await fs.rm(uploadDir, { recursive: true, force: true });
+          console.log(`Cleaned up directory: ${uploadDir}`);
+        } catch (cleanupError) {
+          console.error(
+            `Failed to clean up directory: ${uploadDir}`,
+            cleanupError
+          );
+        }
+
+        setTimeout(() => controller.close(), 500);
       }
     },
   });
