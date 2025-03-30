@@ -124,30 +124,21 @@ const watchAndUpload = (uploadDir, cloudFolder) => {
 // Main upload worker logic
 (async () => {
   try {
-    const { uploadSubDir, folderUUID } = workerData;
+    const { uploadDir, cloudFolder } = workerData;
 
     // Send message indicating start of processing
     parentPort.postMessage({
       success: true,
-      message: `Starting to watch directory: ${uploadSubDir}`,
+      message: `Starting to watch directory: ${uploadDir}`,
     });
 
-    const urls = [];
-
-    for (const element of uploadSubDir) {
-      const m3u8Url = await watchAndUpload(
-        element.dir,
-        `${folderUUID}/${element.height}p`
-      );
-      urls.push({ type: element.height, url: m3u8Url });
-    }
-
     // Start watching the directory and uploading files
+    const m3u8Url = await watchAndUpload(uploadDir, cloudFolder);
 
     // Notify parent with the final m3u8 URL
     parentPort.postMessage({
       success: true,
-      urls,
+      m3u8Url,
       message: "All files processed successfully.",
     });
   } catch (error) {

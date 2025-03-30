@@ -5,7 +5,6 @@ import { randomUUID } from "crypto";
 import path from "path";
 import { promisify } from "util";
 import { exec, execSync } from "child_process";
-const cloudinary = require("cloudinary").v2;
 
 const execPromise = promisify(exec);
 // Allowed video types
@@ -15,52 +14,6 @@ const ALLOWED_VIDEO_TYPES = [
   "video/webm",
   "video/avi",
 ];
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDNAME,
-  api_key: process.env.CLOUDAPIKEY,
-  api_secret: process.env.CLOUDSECRET,
-});
-
-const uploadToCloudinary = async (filePath, folder) => {
-  return new Promise((resolve, reject) => {
-    cloudinary.uploader.upload(
-      filePath,
-      {
-        resource_type: "raw",
-        folder,
-        use_filename: true,
-        unique_filename: false,
-        overwrite: true,
-      },
-      (error, result) => {
-        if (error) {
-          reject(
-            new Error(
-              `Cloudinary upload error for ${filePath}: ${error.message}`
-            )
-          );
-        } else {
-          resolve(result.url);
-        }
-      }
-    );
-  });
-};
-
-const generateMasterPlaylist = (
-  uploadSubDir: { dir: string; height: number; width: number }[]
-): string => {
-  return [
-    "#EXTM3U",
-    ...uploadSubDir.map(
-      (elem, i) =>
-        `#EXT-X-STREAM-INF:BANDWIDTH=${(i + 1) * 800000},RESOLUTION=${
-          elem.width
-        }x${elem.height}\n${elem.height}p/index.m3u8`
-    ),
-  ].join("\n");
-};
 
 const getVideoResolution = async (
   filePath: string
@@ -79,14 +32,14 @@ const getVideoResolution = async (
     throw new Error("Failed to extract video resolution.");
   }
 };
-
+// Function to run FFmpeg in a worker thread
 const runFFmpegWorker = (
   inputFilePath: string,
-  uploadSubDir: { dir: string; height: number; width: number }[]
+  uploadDir: string
 ): Promise<void> => {
   return new Promise((resolve, reject) => {
     const worker = new Worker(path.resolve("./app/api/up/ffmpegWorker.js"), {
-      workerData: { inputFilePath, uploadSubDir },
+      workerData: { inputFilePath, uploadDir },
     });
 
     worker.on("message", (message) => {
@@ -106,17 +59,17 @@ const runFFmpegWorker = (
 };
 
 const runUploadWorker = (
-  uploadSubDir: { dir: string; height: number; width: number }[],
-  folderUUID: string
-): Promise<any> => {
+  uploadDir: string,
+  cloudFolder: string
+): Promise<string> => {
   return new Promise((resolve, reject) => {
     const worker = new Worker(path.resolve("./app/api/up/uploadWorker.js"), {
-      workerData: { uploadSubDir, folderUUID },
+      workerData: { uploadDir, cloudFolder },
     });
 
     worker.on("message", (message) => {
-      if (message.success && message.urls) {
-        resolve(message.urls);
+      if (message.success && message.m3u8Url) {
+        resolve(message.m3u8Url);
       } else if (message.error) {
         reject(new Error(message.error));
       }
@@ -170,60 +123,18 @@ export async function POST(req: Request): Promise<Response> {
 
         sendStatus(evtid.id++, "Checking resolution...");
         const { width, height } = await getVideoResolution(inputFilePath);
-        if (height > width) throw new Error("aspect should be lanscape");
         if (Math.min(height, width) < 360) {
           throw new Error(`Video resolution too low: ${width}x${height}`);
         }
         sendStatus(evtid.id++, "Processing the video...");
 
         // Ensure the upload directory exists
-        console.log("reaching0");
         await fs.mkdir(uploadDir, { recursive: true });
-        const uploadSubDir = [
-          { dir: `${uploadDir}/360p`, height: 360, width: 640 },
-        ];
-        console.log("reaching1");
-        if (height >= 480)
-          uploadSubDir.push({
-            dir: `${uploadDir}/480p`,
-            height: 480,
-            width: 854,
-          });
-        if (height >= 720)
-          uploadSubDir.push({
-            dir: `${uploadDir}/720p`,
-            height: 720,
-            width: 1280,
-          });
-        if (height >= 1080)
-          uploadSubDir.push({
-            dir: `${uploadDir}/1080p`,
-            height: 1080,
-            width: 1920,
-          });
-        if (height >= 1620)
-          uploadSubDir.push({
-            dir: `${uploadDir}/1620p`,
-            height: 1620,
-            width: 2880,
-          });
-        if (height >= 2430)
-          uploadSubDir.push({
-            dir: `${uploadDir}/2430p`,
-            height: 2430,
-            width: 4320,
-          });
-        console.log("reaching2");
 
-        await Promise.all(
-          uploadSubDir.map((d) => fs.mkdir(d.dir, { recursive: true }))
-        );
-        console.log("All subdirectories created");
-        console.log("reaching3");
-
-        const ffmpegPromise = runFFmpegWorker(inputFilePath, uploadSubDir);
+        // Run FFmpeg in a worker thread
+        const ffmpegPromise = runFFmpegWorker(inputFilePath, uploadDir);
         console.log("ffmpeg started");
-        const uploadPromise = runUploadWorker(uploadSubDir, folderUUID);
+        const uploadPromise = runUploadWorker(uploadDir, folderUUID);
         console.log("uploader started");
 
         await ffmpegPromise;
@@ -232,27 +143,10 @@ export async function POST(req: Request): Promise<Response> {
         console.log(m3u8Url);
         console.log("upload done");
 
-        const masterPlaylistPath = `${uploadDir}/index.m3u8`;
-        const masterPlaylistContent = generateMasterPlaylist(uploadSubDir);
-        masterPlaylistContent.trim();
-
-        console.log(masterPlaylistContent);
-        await fs.writeFile(masterPlaylistPath, masterPlaylistContent);
-
-        const masterurl = await uploadToCloudinary(
-          masterPlaylistPath,
-          folderUUID
-        );
-
-        const videoUrls = {
-          master: `${masterurl}`,
-          ...m3u8Url,
-        };
-
         sendStatus(
           evtid.id++,
           "Video processing completed, uploading playlist...",
-          { url: videoUrls }
+          { url: m3u8Url }
         );
 
         sendStatus(0, "Upload completed!");
